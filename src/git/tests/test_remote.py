@@ -119,6 +119,39 @@ async def test_not_a_repository(tmp_path: Path):
         ("https::https://example.com/r.git", "https::https://example.com/r.git"),
         # A password holding a line separator other than '\n'.
         ("https://u:s3cret\u2028tok@example.com/r", "https://<redacted>@example.com/r"),
+        # Query parameters and fragments (#5508).
+        (
+            "https://git.example.com/g/r.git?private_token=SECRET",
+            "https://git.example.com/g/r.git?private_token=<redacted>",
+        ),
+        (
+            "https://git.example.com/g/r.git?token=SECRET&foo=bar",
+            "https://git.example.com/g/r.git?token=<redacted>&foo=<redacted>",
+        ),
+        (
+            "https://git.example.com/g/r.git?SECRET",
+            "https://git.example.com/g/r.git?<redacted>",
+        ),
+        (
+            "https://git.example.com/g/r.git#SECRET",
+            "https://git.example.com/g/r.git#<redacted>",
+        ),
+        (
+            "https://user:pass@git.example.com/g/r.git?private_token=SECRET#FRAG",
+            "https://<redacted>@git.example.com/g/r.git?private_token=<redacted>#<redacted>",
+        ),
+        (
+            "https://user:pass@git.example.com?private_token=SECRET",
+            "https://<redacted>@git.example.com?private_token=<redacted>",
+        ),
+        (
+            "https://git.example.com?email=a@b.com",
+            "https://git.example.com?email=<redacted>",
+        ),
+        (
+            "https::https://git.example.com/g/r.git?private_token=SECRET#FRAG",
+            "https::https://git.example.com/g/r.git?private_token=<redacted>#<redacted>",
+        ),
     ],
 )
 def test_redact_url(url: str, expected: str):

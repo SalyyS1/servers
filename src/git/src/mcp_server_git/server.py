@@ -897,12 +897,8 @@ def git_branch(
     return branch_info
 
 
-# A URL with an authority part: `scheme://[userinfo@]host...`. The userinfo is
-# everything up to the last '@' before the first '/', which is where git itself
-# stops reading it.
-_URL_USERINFO = re.compile(
-    r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://(?P<userinfo>[^/]*)@"
-)
+# A URL with a scheme (`scheme://...`).
+_URL_SCHEME = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://")
 
 # An explicit remote-helper address, `<transport>::<address>`
 # (`https::https://user:token@host/...`, gitremote-helpers(7)). The address
@@ -925,32 +921,70 @@ _SSH_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
 REDACTED = "<redacted>"
 
 
-def redact_url(url: str) -> str:
-    """`url` with any credential in its userinfo replaced by `<redacted>` (#1611).
+def _redact_query_and_fragment(part: str) -> str:
+    """Redact query parameter values and any non-empty fragment in `part`."""
+    body, has_fragment, fragment = part.partition("#")
+    body, has_query, query = body.partition("?")
+    if has_query and query:
+        tokens = re.split(r"([&;])", query)
+        redacted_tokens: list[str] = []
+        for i, token in enumerate(tokens):
+            if i % 2 == 1 or not token:
+                redacted_tokens.append(token)
+            elif "=" in token:
+                key, _, _ = token.partition("=")
+                redacted_tokens.append(f"{key}={REDACTED}")
+            else:
+                redacted_tokens.append(REDACTED)
+        query = "".join(redacted_tokens)
+    result = f"{body}?{query}" if has_query else body
+    if has_fragment:
+        result += f"#{REDACTED}" if fragment else "#"
+    return result
 
-    A remote URL can carry a credential (`https://user:token@host/...`), and
+
+def redact_url(url: str) -> str:
+    """`url` with credentials in its userinfo, query or fragment replaced by `<redacted>` (#1611, #5508).
+
+    A remote URL can carry a credential (`https://user:token@host/...`,
+    `https://host/r.git?private_token=...`, `https://host/r.git#...`), and
     the tool's output goes to the model, so it must not echo one. Over HTTP(S)
     and every other scheme a token is as often the username as the password
     (`https://<token>@github.com/...`), so the whole userinfo is redacted. An
     SSH username names the account and authenticates nothing, so it stays,
-    with only a password after it redacted. A remote-helper address
-    (`<transport>::<url>`) has its inner URL redacted. An scp-like address
-    (`git@host:path`) or a local path has no userinfo to carry a password and
-    is returned as is.
+    with only a password after it redacted. Query parameter values and any
+    fragment are replaced by `<redacted>`. Path segments are kept as is, since
+    a bare path segment cannot be told apart from a repository path. A
+    remote-helper address (`<transport>::<url>`) has its inner URL redacted.
+    An scp-like address (`git@host:path`) or a local path has no URL scheme
+    and is returned as is.
     """
     helper = _REMOTE_HELPER.match(url)
     if helper is not None:
         return url[: helper.end()] + redact_url(url[helper.end() :])
-    match = _URL_USERINFO.match(url)
-    if match is None:
+    scheme_match = _URL_SCHEME.match(url)
+    if scheme_match is None:
         return url
-    scheme, userinfo = match["scheme"], match["userinfo"]
-    if scheme.lower() in _SSH_SCHEMES:
-        user, has_password, _ = userinfo.partition(":")
-        kept = f"{user}:{REDACTED}" if has_password else user
-    else:
-        kept = REDACTED
-    return f"{scheme}://{kept}@{url[match.end() :]}"
+    scheme = scheme_match["scheme"]
+    rest = url[scheme_match.end() :]
+    slash = rest.find("/")
+    head = rest if slash == -1 else rest[:slash]
+    tail = "" if slash == -1 else rest[slash:]
+    userinfo, has_at, host = head.rpartition("@")
+    if has_at and (
+        "?" not in host and "#" not in host
+        if slash != -1
+        else "?" not in userinfo and "#" not in userinfo
+    ):
+        if scheme.lower() in _SSH_SCHEMES:
+            user, has_password, _ = userinfo.partition(":")
+            kept = f"{user}:{REDACTED}" if has_password else user
+        else:
+            kept = REDACTED
+        if slash == -1:
+            return f"{scheme}://{kept}@{_redact_query_and_fragment(host)}"
+        return f"{scheme}://{kept}@{host}{_redact_query_and_fragment(tail)}"
+    return f"{scheme}://{_redact_query_and_fragment(rest)}"
 
 
 # The config values `git remote -v` builds its URLs from: each remote's
@@ -1474,8 +1508,8 @@ def create_server(repository: Path | None) -> MCPServer:
         name=GitTools.REMOTE.value,
         description=(
             "Lists the repository's remotes with their fetch and push URLs, "
-            "like `git remote -v`. Credentials embedded in a URL are shown as "
-            "<redacted>"
+            "like `git remote -v`. Credentials in a URL's userinfo, query or "
+            "fragment are shown as <redacted>"
         ),
         annotations=READ_ONLY,
         structured_output=False,
