@@ -34,12 +34,20 @@ def normalize_allowed_host(entry: str) -> str:
     value = entry.strip().rstrip(".").lower()
     wildcard = value.startswith("*.")
     name = value[2:] if wildcard else value
-    if not wildcard:
-        try:
-            return ipaddress.ip_address(name.strip("[]")).compressed
-        except ValueError:
-            pass
-    if not name or any(c in name for c in "*/\\:@[]?#% ") or ".." in name:
+    try:
+        ip = ipaddress.ip_address(name.strip("[]")).compressed
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if not wildcard:
+            return ip
+        name = ""
+    if (
+        not name
+        or any(c in name for c in "*/\\:@[]?#% ")
+        or ".." in name
+        or (wildcard and name.rsplit(".", 1)[-1].isdigit())
+    ):
         raise ValueError(
             f"{entry!r} is not a host name, an IP address or *.<domain> "
             "(no scheme, port, path or other wildcard)"
@@ -69,11 +77,12 @@ def host_is_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
     host = host.rstrip(".").lower()
     try:
         host = ipaddress.ip_address(host).compressed
+        is_ip = True
     except ValueError:
-        pass
+        is_ip = False
     for entry in allowed_hosts:
         if entry.startswith("*."):
-            if host.endswith(entry[1:]):
+            if not is_ip and host.endswith(entry[1:]):
                 return True
         elif host == entry:
             return True

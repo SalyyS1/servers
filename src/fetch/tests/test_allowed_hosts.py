@@ -97,6 +97,9 @@ def test_entries_are_normalized(entry: str, normalized: str) -> None:
         "example.com?x",
         "a..b",
         "*.*.example.com",
+        "*.10.0.0.1",
+        "*.0.0.1",
+        "*.[::1]",
     ],
 )
 def test_malformed_entries_are_rejected(entry: str) -> None:
