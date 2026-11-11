@@ -9,8 +9,11 @@ means changing that test.
 """
 
 import json
+import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -32,7 +35,7 @@ from mcp.shared.message import SessionMessage
 from mcp.types import INVALID_PARAMS, JSONRPCRequest, ListRootsResult, Root
 from pydantic import FileUrl
 
-from mcp_server_git.server import serve
+from mcp_server_git.server import _is_junction, serve
 
 SNAPSHOTS = Path(__file__).parent / "snapshots"
 
@@ -1526,6 +1529,90 @@ async def test_restricted_server_accepts_git_dir_symlinks_that_stay_inside(
     hooks.symlink_to(shared_hooks, target_is_directory=True)
     result = await call(root, "git_status", {"repo_path": str(root)})
     assert result["isError"] is False
+
+
+def _make_junction(link: Path, target: Path) -> None:
+    """Create a Windows directory junction at `link` pointing to `target`."""
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_is_junction_detects_junctions_and_reparse_points(tmp_path: Path):
+    # Exercises both Python 3.12+ DirEntry.is_junction() and the <3.12
+    # st_file_attributes FILE_ATTRIBUTE_REPARSE_POINT fallback (#5520).
+    (tmp_path / "sub").mkdir()
+    with os.scandir(tmp_path) as entries:
+        real_entry = next(iter(entries))
+    assert _is_junction(real_entry) is False
+
+    fake_312 = mock.Mock()
+    fake_312.is_junction.return_value = True
+    assert _is_junction(fake_312) is True
+
+    fake_310 = mock.Mock(spec=["stat"])
+    fake_stat = mock.Mock()
+    fake_stat.st_file_attributes = 0x400
+    fake_310.stat.return_value = fake_stat
+    assert _is_junction(fake_310) is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows directory junctions only")
+@pytest.mark.parametrize("entry", ["objects", "refs"])
+async def test_restricted_server_rejects_git_dir_junction_pointing_outside(
+    tmp_path: Path, repo: git.Repo, entry: str
+):
+    # On Windows, a directory junction inside `.git` is followed by git like a
+    # symbolic link (#5520), so one resolving outside the allowed repository is
+    # refused the same way.
+    root = root_of(repo)
+    other = make_repo(tmp_path / "other")
+    nested = make_repo(root / "nested")
+    nested_git = Path(nested.git_dir)
+    nested.close()
+    junction = nested_git / entry
+    rmtree(junction)
+    _make_junction(junction, Path(other.git_dir) / entry)
+    try:
+        for tool, arguments in (
+            ("git_show", {"revision": other.head.commit.hexsha}),
+            ("git_branch", {"branch_type": "local"}),
+        ):
+            result = await call(
+                root, tool, {"repo_path": str(root / "nested"), **arguments}
+            )
+            assert uses_outside(
+                result, (Path(other.git_dir) / entry).resolve(), root
+            ), (tool, result)
+    finally:
+        other.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows directory junctions only")
+async def test_restricted_server_follows_an_allowed_git_dir_junction(
+    tmp_path: Path, repo: git.Repo
+):
+    # A junction that stays inside the allowed repository is followed and its
+    # contents checked (#5520), terminating on cycles.
+    root = root_of(repo)
+    other = make_repo(tmp_path / "other")
+    nested = make_repo(root / "nested")
+    nested_git = Path(nested.git_dir)
+    nested.close()
+    store = root / "store"
+    shutil.copytree(nested_git / "objects", store, symlinks=True)
+    rmtree(nested_git / "objects")
+    _make_junction(nested_git / "objects", store)
+    escape = Path(other.git_dir) / "objects"
+    _make_junction(store / "elsewhere", escape)
+    _make_junction(store / "loop", store)
+    try:
+        result = await call(root, "git_status", {"repo_path": str(root / "nested")})
+        assert uses_outside(result, escape.resolve(), root), result
+    finally:
+        other.close()
 
 
 async def test_restricted_server_rejects_nested_gitdir_naming_main_of_worktree(

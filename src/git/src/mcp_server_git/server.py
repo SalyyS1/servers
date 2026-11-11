@@ -793,6 +793,19 @@ def validate_opened_repo(
 # alternate's objects are read as the repository's own, from wherever it is.
 _ALTERNATES = ("alternates", "http-alternates")
 
+# Windows reparse-point attribute (stat.FILE_ATTRIBUTE_REPARSE_POINT), used on
+# Python < 3.12 where os.DirEntry.is_junction() is not yet available (#5520).
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_junction(entry: os.DirEntry[str]) -> bool:
+    """Whether `entry` is a Windows directory junction (#5520)."""
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None:
+        return bool(is_junction())
+    st = entry.stat(follow_symlinks=False)
+    return bool(getattr(st, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT)
+
 
 def _check_git_dir_contents(
     repo_path: Path,
@@ -805,14 +818,15 @@ def _check_git_dir_contents(
     - An alternate object store (`objects/info/alternates`, and
       `http-alternates`), of any kind: under `--repository`, a repository
       reads only its own objects.
-    - A symbolic link that resolves outside both the allowed repository and
-      `directory` itself: a link at `objects`, `refs`, `index`, `HEAD` or
-      anything else in a git directory is followed by git, for reading and
-      for writing (a linked `index` takes git_add's writes elsewhere).
+    - A symbolic link or Windows directory junction that resolves outside both
+      the allowed repository and `directory` itself: a link at `objects`,
+      `refs`, `index`, `HEAD` or anything else in a git directory is followed
+      by git, for reading and for writing (a linked `index` takes git_add's
+      writes elsewhere).
 
-    A link that is allowed and names a directory is walked too, since git
-    follows it into that directory and on into any link inside it; each
-    directory is walked once, so a cycle of links ends.
+    A link or junction that is allowed and names a directory is walked too,
+    since git follows it into that directory and on into any link inside it;
+    each directory is walked once, so a cycle of links ends.
 
     `hooks` is not walked: no hook runs (`HARDENED_CONFIG`), so a hooks
     directory linked to a shared one elsewhere is harmless.
@@ -836,7 +850,7 @@ def _check_git_dir_contents(
             for entry in entries:
                 if current == directory and entry.name == "hooks":
                     continue
-                if entry.is_symlink():
+                if entry.is_symlink() or _is_junction(entry):
                     target = Path(entry.path).resolve()
                     if not (
                         target.is_relative_to(allowed)
