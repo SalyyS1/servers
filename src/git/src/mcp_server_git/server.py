@@ -943,6 +943,17 @@ def _redact_query_and_fragment(part: str) -> str:
     return result
 
 
+def _has_userinfo_before_query(userinfo: str) -> bool:
+    """Whether `userinfo` (before `@` in a pathless URL) is userinfo rather than `host?query`."""
+    if "?" not in userinfo and "#" not in userinfo:
+        return True
+    before_qf = re.split(r"[?#]", userinfo, maxsplit=1)[0]
+    if "@" in before_qf:
+        return True
+    _, has_colon, after_colon = before_qf.partition(":")
+    return has_colon and not after_colon.isdigit()
+
+
 def redact_url(url: str) -> str:
     """`url` with credentials in its userinfo, query or fragment replaced by `<redacted>` (#1611, #5508).
 
@@ -974,7 +985,7 @@ def redact_url(url: str) -> str:
     if has_at and (
         "?" not in host and "#" not in host
         if slash != -1
-        else "?" not in userinfo and "#" not in userinfo
+        else _has_userinfo_before_query(userinfo)
     ):
         if scheme.lower() in _SSH_SCHEMES:
             user, has_password, _ = userinfo.partition(":")

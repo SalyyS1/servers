@@ -149,6 +149,10 @@ async def test_not_a_repository(tmp_path: Path):
             "https://git.example.com?email=<redacted>",
         ),
         (
+            "https://user:p?ss@host.example",
+            "https://<redacted>@host.example",
+        ),
+        (
             "https::https://git.example.com/g/r.git?private_token=SECRET#FRAG",
             "https::https://git.example.com/g/r.git?private_token=<redacted>#<redacted>",
         ),
